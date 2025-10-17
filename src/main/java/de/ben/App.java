@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Small command-line wrapper for the FileCopy utility.
- * Usage: java -jar foo.jar <sourceDir> <targetDir> [threads]
+ * Usage: java -jar foo.jar <sourcePath> <targetPath> [threads]
  * If threads is omitted the application uses Runtime.availableProcessors().
  */
 public class App {
@@ -19,7 +19,7 @@ public class App {
 
     public static void main(String[] args) {
         if (args.length < 2) {
-            LOG.error("Usage: java -jar foo.jar <sourceDir> <targetDir> [threads]");
+            LOG.error("Usage: java -jar foo.jar <sourcePath> <targetPath> [threads]");
             System.exit(2);
         }
 
@@ -41,7 +41,8 @@ public class App {
                 LOG.error("Source does not exist: {}", source);
                 System.exit(4);
             }
-            FileCopy.copyDirectory(source, target, threads);
+            // Use unified copy API that supports files and directories
+            FileCopy.copy(source, target, threads);
             LOG.info("Copy finished successfully.");
         } catch (InterruptedException ie) {
             // Restore interrupt status and exit
