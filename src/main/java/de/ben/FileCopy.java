@@ -26,7 +26,7 @@ public final class FileCopy {
     private static final Logger LOG = LoggerFactory.getLogger(FileCopy.class);
 
     // Minimal size to attempt parallel copy (1 MB)
-    private static final long MIN_PARALLEL_SIZE = 1L * 1024L * 1024L;
+    private static final long MIN_PARALLEL_SIZE = 1024L * 1024L;
     // Buffer size used by chunk workers
     private static final int IO_BUFFER = 64 * 1024;
 

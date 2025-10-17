@@ -11,7 +11,7 @@ import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-public class FileCopyFileTest {
+ class FileCopyFileTest {
 
     @Test
     void copiesSingleSmallFile(@TempDir Path tempDir) throws IOException, InterruptedException {
