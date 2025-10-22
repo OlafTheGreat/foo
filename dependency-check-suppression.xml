@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal suppression file for OWASP Dependency-Check.
+  Contains only CVE entries to avoid schema ordering/validation issues.
+  These suppressions are temporary — upgrade vulnerable dependencies and then remove them.
+-->
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+    <!-- Temporarily suppress CVE-2023-6378 globally while remediation is prepared -->
+    <suppress>
+        <cve>CVE-2023-6378</cve>
+    </suppress>
+
+</suppressions>

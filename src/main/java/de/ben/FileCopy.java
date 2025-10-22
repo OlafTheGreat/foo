@@ -11,63 +11,143 @@ import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Robust, production-ready directory & file copier with focus on stability and security.
+ * Eine Thread-sichere, hochperformante Implementierung zum Kopieren von Dateien und Verzeichnissen.
+ * Diese Klasse bietet fortgeschrittene Funktionen wie paralleles Kopieren, Fortschrittsüberwachung,
+ * und sichere Behandlung von Symlinks.
+ *
+ * <p>Hauptmerkmale:</p>
+ * <ul>
+ *   <li>Parallele Verarbeitung großer Dateien für maximale Performance</li>
+ *   <li>Batch-Verarbeitung kleiner Dateien zur Optimierung des Durchsatzes</li>
+ *   <li>Automatische Wiederholungsversuche bei temporären IO-Fehlern</li>
+ *   <li>Sichere Behandlung von Symlinks und POSIX-Berechtigungen</li>
+ *   <li>Fortschrittsüberwachung und Abbruchmöglichkeit</li>
+ * </ul>
+ *
+ * <p>Thread-Safety: Diese Klasse ist thread-safe. Alle öffentlichen Methoden können
+ * sicher von mehreren Threads parallel aufgerufen werden.</p>
+ *
+ * @author Ben
+ * @version 2.0
+ * @since 1.0
  */
 public final class FileCopy {
-
     private static final Logger LOG = LoggerFactory.getLogger(FileCopy.class);
 
-    // Minimal size to attempt parallel copy (1 MB)
-    private static final long MIN_PARALLEL_SIZE = 1024L * 1024L;
-    // Buffer size used by chunk workers
-    private static final int IO_BUFFER = 64 * 1024;
+    // Performance-Optimierung
+    private static final long MIN_PARALLEL_SIZE = 1024L * 1024L;  // 1 MB
+    private static final int IO_BUFFER = 64 * 1024;               // 64 KB
+    private static final int RETRY_DELAY_MS = 100;                // 100 ms
+    private static final int MAX_RETRIES = 3;
 
     private FileCopy() {
-        // utility class
+        throw new AssertionError("Utility-Klasse darf nicht instanziiert werden");
     }
 
-    // Backwards-compatible convenience method
+    /**
+     * Kopiert eine Datei oder ein Verzeichnis mit Standardoptionen.
+     *
+     * @param source  Quellpfad (Datei oder Verzeichnis)
+     * @param target  Zielpfad
+     * @param threads Anzahl der zu verwendenden Threads
+     * @throws IOException          wenn ein IO-Fehler auftritt
+     * @throws InterruptedException wenn der Vorgang unterbrochen wird
+     * @throws SecurityException    wenn keine ausreichenden Berechtigungen vorliegen
+     * @throws NullPointerException wenn source oder target null sind
+     */
     public static void copy(Path source, Path target, int threads) throws IOException, InterruptedException {
         copy(source, target, threads, FileCopyOptions.defaults());
     }
 
-    // New API with options
-    public static void copy(Path source, Path target, int threads, FileCopyOptions options) throws IOException, InterruptedException {
-        Objects.requireNonNull(source, "source");
-        Objects.requireNonNull(target, "target");
-        Objects.requireNonNull(options, "options");
-        if (threads <= 0) throw new IllegalArgumentException("threads must be >= 1");
+    /**
+     * Kopiert eine Datei oder ein Verzeichnis mit benutzerdefinierten Optionen.
+     *
+     * @param source  Quellpfad (Datei oder Verzeichnis)
+     * @param target  Zielpfad
+     * @param threads Anzahl der zu verwendenden Threads (min. 1)
+     * @param options Kopieroptionen
+     * @throws IOException          wenn ein IO-Fehler auftritt
+     * @throws InterruptedException wenn der Vorgang unterbrochen wird
+     * @throws SecurityException    wenn keine ausreichenden Berechtigungen vorliegen
+     * @throws NullPointerException wenn ein Parameter null ist
+     */
+    public static void copy(Path source, Path target, int threads, FileCopyOptions options)
+            throws IOException, InterruptedException {
+        validateParameters(source, target, threads, options);
 
         Path src = source.toAbsolutePath().normalize();
         Path tgt = target.toAbsolutePath().normalize();
 
-        if (!Files.exists(src)) throw new IOException("Source does not exist: " + src);
+        // Prüfe auf zirkuläre Referenzen
+        if (isSubPath(src, tgt)) {
+            throw new IOException("Zielverzeichnis darf kein Unterverzeichnis der Quelle sein: " + tgt);
+        }
+
+        if (!Files.exists(src)) {
+            throw new NoSuchFileException(src.toString());
+        }
 
         if (Files.isDirectory(src)) {
             copyDirectory(src, tgt, threads, options);
-            return;
-        }
-
-        if (Files.isRegularFile(src) || Files.isSymbolicLink(src)) {
-            long size = Files.size(src);
-            if (threads > 1 && size >= MIN_PARALLEL_SIZE) {
-                copyFileParallel(src, tgt, threads, options);
-            } else {
-                // reuse atomic single-file copy
-                copyFileAtomic(src, tgt, options);
+        } else if (Files.isRegularFile(src) || Files.isSymbolicLink(src)) {
+            // If target is an existing directory, copy the source file into that directory
+            Path effectiveTarget = tgt;
+            try {
+                if (Files.exists(tgt) && Files.isDirectory(tgt)) {
+                    Path fileName = src.getFileName();
+                    if (fileName == null) {
+                        throw new IOException("Source has no filename: " + src);
+                    }
+                    effectiveTarget = tgt.resolve(fileName).normalize();
+                }
+            } catch (SecurityException se) {
+                throw new IOException("Cannot access target path: " + tgt, se);
             }
-            return;
+            copyFileWithSize(src, effectiveTarget, threads, options);
+        } else {
+            throw new IOException("Nicht unterstützter Dateityp: " + src);
         }
+    }
 
-        throw new IOException("Unsupported source type: " + src);
+    /**
+     * Prüft, ob ein Pfad ein Unterpfad eines anderen ist.
+     * @param parent potenzieller Elternpfad
+     * @param child  zu prüfender Kindpfad
+     * @return true wenn child ein Unterpfad von parent ist
+     */
+    private static boolean isSubPath(Path parent, Path child) {
+        return child.normalize().startsWith(parent.normalize());
+    }
+
+    /**
+     * Validiert die Eingabeparameter für die Kopiermethoden.
+     */
+    private static void validateParameters(Path source, Path target, int threads, FileCopyOptions options) {
+        Objects.requireNonNull(source, "source darf nicht null sein");
+        Objects.requireNonNull(target, "target darf nicht null sein");
+        Objects.requireNonNull(options, "options darf nicht null sein");
+
+        if (threads < 1) {
+            throw new IllegalArgumentException("threads muss >= 1 sein, war: " + threads);
+        }
+    }
+
+    /**
+     * Kopiert eine einzelne Datei unter Berücksichtigung ihrer Größe.
+     */
+    private static void copyFileWithSize(Path source, Path target, int threads, FileCopyOptions options)
+            throws IOException, InterruptedException {
+        long size = Files.size(source);
+        if (threads > 1 && size >= MIN_PARALLEL_SIZE) {
+            copyFileParallel(source, target, threads, options);
+        } else {
+            copyFileAtomic(source, target, options);
+        }
     }
 
     /**
@@ -118,7 +198,40 @@ public final class FileCopy {
         }
     }
 
-    private static void scheduleCopyTasks(final Path src, final Path tgt, ExecutorService executor, List<Future<Void>> futures, FileCopyOptions options) throws IOException {
+    private static void copyFileWithRetry(Path source, Path target, FileCopyOptions options) throws IOException {
+        int attempts = 0;
+        IOException lastException = null;
+
+        while (attempts <= options.maxRetries) {
+            try {
+                copyFileAtomic(source, target, options);
+                return; // Success
+            } catch (IOException e) {
+                lastException = e;
+                attempts++;
+
+                if (attempts <= options.maxRetries) {
+                    LOG.warn("Copy attempt {} failed for {}, retrying in {}ms: {}",
+                            attempts, source, options.retryDelayMs, e.getMessage());
+                    try {
+                        Thread.sleep(options.retryDelayMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Copy interrupted during retry delay", ie);
+                    }
+                }
+            }
+        }
+
+        throw new IOException("Copy failed after " + attempts + " attempts: " + source, lastException);
+    }
+
+    private static void scheduleCopyTasks(final Path src, final Path tgt, ExecutorService executor,
+                                          List<Future<Void>> futures, FileCopyOptions options) throws IOException {
+
+        // Sammle kleine Dateien für Batch-Processing
+        List<Path> smallFiles = new ArrayList<>();
+
         Files.walkFileTree(src, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
@@ -142,45 +255,83 @@ public final class FileCopy {
                     throw new IOException("Attempt to write outside target directory: " + targetFile);
                 }
 
-                futures.add(executor.submit(() -> {
-                    try {
-                        if (Files.isSymbolicLink(file) && !options.followSymlinks) {
-                            // replicate the symlink itself
-                            Path linkTarget = Files.readSymbolicLink(file);
-                            // ensure parent exists
-                            Path p = targetFile.getParent();
-                            if (p != null && !Files.exists(p)) Files.createDirectories(p);
-                            Files.deleteIfExists(targetFile);
-                            Files.createSymbolicLink(targetFile, linkTarget);
-                        } else {
-                            // follow symlink or regular file: copy content
-                            long size = Files.size(file);
-                            if (options.progressListener != null && size > 0 && size >= MIN_PARALLEL_SIZE && executor != null) {
-                                // try parallel copy for large files
-                                copyFileParallel(file, targetFile, Math.max(1, Runtime.getRuntime().availableProcessors()), options);
-                            } else {
-                                copyFileAtomic(file, targetFile, options);
-                            }
+                if (attrs.size() <= options.smallFileThreshold) {
+                    smallFiles.add(file);
 
-                            // preserve POSIX permissions if requested and supported
-                            if (options.preservePosixPermissions) {
-                                try {
-                                    Set<PosixFilePermission> perms = Files.getPosixFilePermissions(file);
-                                    Files.setPosixFilePermissions(targetFile, perms);
-                                } catch (UnsupportedOperationException | IOException ignored) {
-                                    LOG.debug("Posix permissions not preserved for {}", targetFile);
-                                }
-                            }
-                        }
-                    } catch (IOException e) {
-                        throw e;
+                    // Wenn Batch-Größe erreicht, plane Batch-Kopie
+                    if (smallFiles.size() >= options.smallFileBatchSize) {
+                        scheduleSmallFilesBatch(new ArrayList<>(smallFiles), src, tgt, executor, futures, options);
+                        smallFiles.clear();
                     }
-                    return null;
-                }));
+                } else {
+                    // Große Dateien sofort planen
+                    futures.add(executor.submit(() -> {
+                        try {
+                            if (Files.isSymbolicLink(file) && !options.followSymlinks) {
+                                handleSymlink(file, targetFile);
+                            } else {
+                                copyFileWithRetry(file, targetFile, options);
+                                handlePostCopyTasks(file, targetFile, options);
+                            }
+                        } catch (IOException e) {
+                            throw e;
+                        }
+                        return null;
+                    }));
+                }
 
                 return FileVisitResult.CONTINUE;
             }
         });
+
+        // Restliche kleine Dateien verarbeiten
+        if (!smallFiles.isEmpty()) {
+            scheduleSmallFilesBatch(smallFiles, src, tgt, executor, futures, options);
+        }
+    }
+
+    private static void scheduleSmallFilesBatch(List<Path> files, Path src, Path tgt,
+                                                ExecutorService executor, List<Future<Void>> futures, FileCopyOptions options) {
+
+        futures.add(executor.submit(() -> {
+            for (Path file : files) {
+                Path relative = src.relativize(file);
+                Path targetFile = tgt.resolve(relative).normalize();
+
+                try {
+                    if (Files.isSymbolicLink(file) && !options.followSymlinks) {
+                        handleSymlink(file, targetFile);
+                    } else {
+                        copyFileWithRetry(file, targetFile, options);
+                        handlePostCopyTasks(file, targetFile, options);
+                    }
+                } catch (IOException e) {
+                    throw e;
+                }
+            }
+            return null;
+        }));
+    }
+
+    private static void handleSymlink(Path source, Path target) throws IOException {
+        Path linkTarget = Files.readSymbolicLink(source);
+        Path parent = target.getParent();
+        if (parent != null && !Files.exists(parent)) {
+            Files.createDirectories(parent);
+        }
+        Files.deleteIfExists(target);
+        Files.createSymbolicLink(target, linkTarget);
+    }
+
+    private static void handlePostCopyTasks(Path source, Path target, FileCopyOptions options) throws IOException {
+        if (options.preservePosixPermissions) {
+            try {
+                Set<PosixFilePermission> perms = Files.getPosixFilePermissions(source);
+                Files.setPosixFilePermissions(target, perms);
+            } catch (UnsupportedOperationException | IOException ignored) {
+                LOG.debug("Posix permissions not preserved for {}", target);
+            }
+        }
     }
 
     private static void awaitFutures(List<Future<Void>> futures, ExecutorService executor) throws IOException, InterruptedException {

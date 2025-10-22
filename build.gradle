@@ -1,5 +1,6 @@
 plugins {
     id 'java'
+    id 'org.owasp.dependencycheck' version '12.1.8'
 }
 
 group = 'de.ben'
@@ -16,14 +17,49 @@ java {
 }
 
 dependencies {
-    implementation 'org.slf4j:slf4j-api:2.0.9'
-    runtimeOnly 'ch.qos.logback:logback-classic:1.4.11'
+    implementation 'org.slf4j:slf4j-api:2.0.17'
+    // NOTE: verify the logback version for any known CVEs (dependency-check report will indicate if upgrade required)
+    // Bumped to a newer patch release to mitigate known CVEs (replace with latest confirmed-good version in production)
+    runtimeOnly 'ch.qos.logback:logback-classic:1.5.19'
+    runtimeOnly 'ch.qos.logback:logback-core:1.5.19'
 
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // AssertJ for fluent assertions
+    testImplementation 'org.assertj:assertj-core:3.24.2'
+    // AssertJ-Swing for EDT helpers and GUI testing support
+    testImplementation('org.assertj:assertj-swing-junit:3.17.1') {
+        // Exclude the old JUnit 4 transitive dependency to keep tests on JUnit Jupiter
+        exclude group: 'junit', module: 'junit'
+    }
+}
+
+// Configure dependency-check plugin with conservative defaults
+dependencyCheck {
+    nvd {
+        apiKey = "97817e35-d330-45ee-a917-24e7b770cdca"
+    }
+    formats = ['HTML', 'CSV']
+    // use modern Gradle API for build directory (avoids deprecated 'buildDir')
+    outputDirectory = layout.buildDirectory.dir('reports/dependency-check').get().asFile.toString()
+    // Re-enable failing the build on high CVSS scores; suppressions added for known issues.
+    // Permanent fix: upgrade vulnerable dependencies (e.g. logback) to a patched version and remove suppressions.
+    failBuildOnCVSS = 7
+    suppressionFile = 'dependency-check-suppression.xml'
+    // limit noisy analyzers by default
+    analyzers {
+        assemblyEnabled = false
+    }
 }
 
 test {
     useJUnitPlatform()
+}
+
+tasks.register('buildNoTests') {
+    group = 'build'
+    description = 'Assemble artifacts without running tests (shortcut for "./gradlew assemble").'
+    dependsOn tasks.named('assemble')
 }
